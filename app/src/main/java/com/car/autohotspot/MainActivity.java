@@ -8,9 +8,7 @@ import android.content.Intent;
 import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
 import android.content.pm.ResolveInfo;
-import android.net.Uri;
 import android.net.wifi.WifiManager;
-import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
@@ -29,94 +27,102 @@ public class MainActivity extends Activity {
 
     private SharedPreferences prefs;
     public static final String PREF_TARGET_PKG = "target_pkg";
-    public static volatile boolean isTaskRunning = false;
+    // 默认直接绑定你的 CarPlay 软件 com.shihab.diplay
+    public static final String DEFAULT_CARPLAY_PKG = "com.shihab.diplay";
 
     private final Handler handler = new Handler(Looper.getMainLooper());
-    private Runnable autoLaunchTask;
-    private Runnable checkApStatusRunnable;
-    private int waitCount = 0;
+    private TextView statusTv;
+    // 防止从设置页返回时重复触发
+    private static long lastTriggerTime = 0;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         prefs = getSharedPreferences("config", MODE_PRIVATE);
 
+        // 如果还没有保存过包名，默认写入 com.shihab.diplay
+        if (prefs.getString(PREF_TARGET_PKG, "").isEmpty()) {
+            prefs.edit().putString(PREF_TARGET_PKG, DEFAULT_CARPLAY_PKG).apply();
+        }
+
         LinearLayout layout = new LinearLayout(this);
         layout.setOrientation(LinearLayout.VERTICAL);
         layout.setPadding(50, 40, 50, 40);
 
-        final TextView statusTv = new TextView(this);
-        String savedPkg = prefs.getString(PREF_TARGET_PKG, "");
-        boolean accEnabled = isAccessibilitySettingsOn();
-        statusTv.setText("1. 无障碍服务状态：" + (accEnabled ? "【已开启】" : "【未开启 - 请点击下方按钮开启】")
-                + "\n2. 绑定的目标软件：" + (savedPkg.isEmpty() ? "【未选择】" : savedPkg)
-                + "\n\n执行顺序：先打开热点 -> 确认热点开启成功后 -> 自动打开目标软件");
+        statusTv = new TextView(this);
         statusTv.setTextSize(16);
         layout.addView(statusTv);
 
         Button accBtn = new Button(this);
         accBtn.setText("第一步：开启【无障碍服务】权限");
         accBtn.setOnClickListener(v -> {
-            cancelAllTasks();
-            Toast.makeText(this, "请找到【车机热点自启】并开启", Toast.LENGTH_LONG).show();
+            HotspotAccessibilityService.stopTask();
             startActivity(new Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS));
         });
         layout.addView(accBtn);
 
         Button selectBtn = new Button(this);
-        selectBtn.setText("第二步：选择要自动打开的软件 (CarPlay)");
+        selectBtn.setText("第二步：更换绑定的目标软件（已默认绑定 com.shihab.diplay）");
         selectBtn.setOnClickListener(v -> {
-            cancelAllTasks();
-            showAppPicker(statusTv);
+            HotspotAccessibilityService.stopTask();
+            showAppPicker();
         });
         layout.addView(selectBtn);
 
         Button testBtn = new Button(this);
-        testBtn.setText("第三步：立即测试（先开热点 -> 成功后开软件）");
+        testBtn.setText("第三步：立即执行（开热点 -> 成功后开 CarPlay）");
         testBtn.setOnClickListener(v -> {
-            cancelAllTasks();
-            startSequentialWorkflow();
+            lastTriggerTime = 0;
+            executeImmediately();
         });
         layout.addView(testBtn);
 
         setContentView(layout);
+    }
 
-        // 如果无障碍已开启且软件已绑定，启动本软件 2 秒后自动开始流程
-        if (!savedPkg.isEmpty() && accEnabled) {
-            Toast.makeText(this, "2秒后自动执行（点击任意按钮可中断修改设置）", Toast.LENGTH_SHORT).show();
-            autoLaunchTask = this::startSequentialWorkflow;
-            handler.postDelayed(autoLaunchTask, 2000);
+    @Override
+    protected void onResume() {
+        super.onResume();
+        updateStatusText();
+
+        // 只要无障碍已开启，且距离上次触发超过 8 秒，打开软件瞬间立即执行命令！
+        if (isAccessibilitySettingsOn()) {
+            long now = System.currentTimeMillis();
+            if (now - lastTriggerTime > 8000) {
+                lastTriggerTime = now;
+                // 延迟 200ms 待界面稳定后立即执行，无需等 2 秒
+                handler.postDelayed(this::executeImmediately, 200);
+            }
         }
     }
 
-    private void cancelAllTasks() {
-        isTaskRunning = false;
-        if (autoLaunchTask != null) handler.removeCallbacks(autoLaunchTask);
-        if (checkApStatusRunnable != null) handler.removeCallbacks(checkApStatusRunnable);
+    private void updateStatusText() {
+        String savedPkg = prefs.getString(PREF_TARGET_PKG, DEFAULT_CARPLAY_PKG);
+        boolean accEnabled = isAccessibilitySettingsOn();
+        statusTv.setText("1. 无障碍服务状态：" + (accEnabled ? "【已开启】" : "【未开启 - 请点击下方按钮开启】")
+                + "\n2. 绑定的目标软件：" + savedPkg
+                + "\n\n当前模式：打开本软件即刻执行，常驻后台不销毁。");
     }
 
-    /**
-     * 严格顺序工作流：步骤1 检查/开启热点 -> 步骤2 循环等待热点真正开启 -> 步骤3 打开目标软件
-     */
-    private void startSequentialWorkflow() {
-        // 如果热点已经开着了，直接打开目标软件
-        if (isWifiApEnabled(this)) {
-            Toast.makeText(this, "热点已处于开启状态，直接启动目标软件...", Toast.LENGTH_SHORT).show();
-            launchTargetApp();
-            return;
-        }
+    private void executeImmediately() {
+        String targetPkg = prefs.getString(PREF_TARGET_PKG, DEFAULT_CARPLAY_PKG);
 
         if (!isAccessibilitySettingsOn()) {
-            Toast.makeText(this, "请先点击第一步开启【无障碍服务】权限！", Toast.LENGTH_LONG).show();
+            Toast.makeText(this, "请先开启【车机热点自启】无障碍权限！", Toast.LENGTH_LONG).show();
             startActivity(new Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS));
             return;
         }
 
-        // 标记任务开始，激活无障碍自动点击状态机
-        isTaskRunning = true;
-        HotspotAccessibilityService.resetState();
+        // 如果检测到热点本来就已经开着，直接秒开 CarPlay
+        if (isWifiApEnabled(this)) {
+            launchApp(this, targetPkg);
+            return;
+        }
 
-        // 跳转到系统热点设置页面
+        // 启动无障碍后台状态机（由无障碍服务全权负责：点热点 -> 等开启 -> 拉起 CarPlay）
+        HotspotAccessibilityService.startTask(this, targetPkg);
+
+        // 直接跳转到热点设置页
         try {
             Intent intent = new Intent();
             intent.setComponent(new ComponentName("com.android.settings", "com.android.settings.TetherSettings"));
@@ -125,30 +131,6 @@ public class MainActivity extends Activity {
         } catch (Exception e) {
             startActivity(new Intent(Settings.ACTION_WIRELESS_SETTINGS));
         }
-
-        // 开始循环检测热点是否真正开启成功（每 500ms 检查一次，最多等待 12 秒）
-        waitCount = 0;
-        checkApStatusRunnable = new Runnable() {
-            @Override
-            public void run() {
-                if (!isTaskRunning) return;
-                waitCount++;
-
-                if (isWifiApEnabled(MainActivity.this)) {
-                    // 检测到热点已经真正开启！停止无障碍点击，等待 1 秒稳定后打开 CarPlay
-                    isTaskRunning = false;
-                    Toast.makeText(MainActivity.this, "热点开启成功！正在打开目标软件...", Toast.LENGTH_SHORT).show();
-                    handler.postDelayed(() -> launchTargetApp(), 1000);
-                } else if (waitCount < 24) {
-                    // 还没开好，继续等无障碍服务点击并每 0.5 秒复查一次
-                    handler.postDelayed(this, 500);
-                } else {
-                    isTaskRunning = false;
-                    Toast.makeText(MainActivity.this, "开启热点超时，请检查热点页面结构", Toast.LENGTH_SHORT).show();
-                }
-            }
-        };
-        handler.postDelayed(checkApStatusRunnable, 800);
     }
 
     public static boolean isWifiApEnabled(Context context) {
@@ -156,20 +138,24 @@ public class MainActivity extends Activity {
             WifiManager wm = (WifiManager) context.getApplicationContext().getSystemService(Context.WIFI_SERVICE);
             Method method = wm.getClass().getDeclaredMethod("isWifiApEnabled");
             method.setAccessible(true);
+            int state = (Integer) wm.getClass().getDeclaredMethod("getWifiApState").invoke(wm);
+            // Android WifiManager.WIFI_AP_STATE_ENABLED 的值是 13 (或 3)
+            if (state == 13 || state == 3) return true;
             return (Boolean) method.invoke(wm);
         } catch (Exception e) {
             return false;
         }
     }
 
-    private void launchTargetApp() {
-        String pkg = prefs.getString(PREF_TARGET_PKG, "");
-        if (pkg.isEmpty()) return;
-        Intent launchIntent = getPackageManager().getLaunchIntentForPackage(pkg);
+    public static void launchApp(Context context, String pkg) {
+        if (TextUtils.isEmpty(pkg)) return;
+        Intent launchIntent = context.getPackageManager().getLaunchIntentForPackage(pkg);
         if (launchIntent != null) {
             launchIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
-            startActivity(launchIntent);
-            finish();
+            context.startActivity(launchIntent);
+            // 注意：这里去掉了 finish()，让本软件常驻在车机后台随时待命！
+        } else {
+            Toast.makeText(context, "找不到目标软件: " + pkg, Toast.LENGTH_SHORT).show();
         }
     }
 
@@ -179,7 +165,7 @@ public class MainActivity extends Activity {
         return !TextUtils.isEmpty(enabledServices) && enabledServices.contains(service);
     }
 
-    private void showAppPicker(final TextView statusTv) {
+    private void showAppPicker() {
         PackageManager pm = getPackageManager();
         Intent mainIntent = new Intent(Intent.ACTION_MAIN, null);
         mainIntent.addCategory(Intent.CATEGORY_LAUNCHER);
@@ -200,8 +186,7 @@ public class MainActivity extends Activity {
                 .setItems(names.toArray(new String[0]), (d, which) -> {
                     String selected = pkgs.get(which);
                     prefs.edit().putString(PREF_TARGET_PKG, selected).apply();
-                    statusTv.setText("1. 无障碍服务状态：" + (isAccessibilitySettingsOn() ? "【已开启】" : "【未开启】")
-                            + "\n2. 绑定的目标软件：" + selected);
+                    updateStatusText();
                 })
                 .show();
     }
