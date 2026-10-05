@@ -42,7 +42,6 @@ public class MainActivity extends Activity {
         super.onCreate(savedInstanceState);
         prefs = getSharedPreferences("config", MODE_PRIVATE);
 
-        // 1. 申请修改系统设置权限（首次打开引导授权，永久有效）
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M && !Settings.System.canWrite(this)) {
             Toast.makeText(this, "请授予【允许修改系统设置】权限", Toast.LENGTH_LONG).show();
             try {
@@ -56,7 +55,7 @@ public class MainActivity extends Activity {
         layout.setOrientation(LinearLayout.VERTICAL);
         layout.setPadding(50, 40, 50, 40);
 
-        TextView statusTv = new TextView(this);
+        final TextView statusTv = new TextView(this);
         String savedPkg = prefs.getString(PREF_TARGET_PKG, "");
         statusTv.setText("当前绑定的 CarPlay 软件：\n" + (savedPkg.isEmpty() ? "【未选择】" : savedPkg));
         statusTv.setTextSize(18);
@@ -78,7 +77,9 @@ public class MainActivity extends Activity {
             prefs.edit().putBoolean(PREF_USE_ACCESSIBILITY, isChecked).apply();
             if (isChecked) {
                 Toast.makeText(this, "请在无障碍设置中开启【车机热点自启】", Toast.LENGTH_LONG).show();
-                startActivity(new Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS));
+                try {
+                    startActivity(new Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS));
+                } catch (Exception ignored) {}
             }
         });
         layout.addView(accCheck);
@@ -93,7 +94,6 @@ public class MainActivity extends Activity {
 
         setContentView(layout);
 
-        // 如果已配置好目标软件，启动后留 2.5 秒缓冲（方便随时点界面修改设置），随后自动执行
         if (!savedPkg.isEmpty()) {
             Toast.makeText(this, "2秒后自动开启热点并跳转（点击任意按钮可中断）", Toast.LENGTH_SHORT).show();
             autoLaunchTask = this::runWorkflow;
@@ -109,7 +109,6 @@ public class MainActivity extends Activity {
 
     private void runWorkflow() {
         if (isApEnabled()) {
-            // 热点本来就是开着的，直接进 CarPlay
             launchTargetApp();
             return;
         }
@@ -123,14 +122,15 @@ public class MainActivity extends Activity {
             }
         }
 
-        // 如果静默接口被车机拦截，或者勾选了无障碍模式，则自动跳热点界面由无障碍服务点开
         needAutoClickHotspot = true;
         try {
             Intent intent = new Intent();
             intent.setComponent(new ComponentName("com.android.settings", "com.android.settings.TetherSettings"));
             startActivity(intent);
         } catch (Exception e) {
-            startActivity(new Intent(Settings.ACTION_WIRELESS_SETTINGS));
+            try {
+                startActivity(new Intent(Settings.ACTION_WIRELESS_SETTINGS));
+            } catch (Exception ignored) {}
         }
         handler.postDelayed(this::launchTargetApp, 3000);
     }
@@ -148,11 +148,12 @@ public class MainActivity extends Activity {
 
     private boolean enableHotspotSilently() {
         WifiManager wm = (WifiManager) getApplicationContext().getSystemService(Context.WIFI_SERVICE);
-        if (wm != null && wm.isWifiEnabled()) {
-            wm.setWifiEnabled(false);
-        }
+        try {
+            if (wm != null && wm.isWifiEnabled()) {
+                wm.setWifiEnabled(false);
+            }
+        } catch (Exception ignored) {}
 
-        // 方式 1：反射 ConnectivityManager.startTethering
         try {
             ConnectivityManager cm = (ConnectivityManager) getSystemService(Context.CONNECTIVITY_SERVICE);
             for (Method m : cm.getClass().getDeclaredMethods()) {
@@ -165,7 +166,6 @@ public class MainActivity extends Activity {
             }
         } catch (Exception ignored) {}
 
-        // 方式 2：反射 WifiManager.setWifiApEnabled (联发科 MT8321 常用底层接口)
         try {
             if (wm != null) {
                 Method m = wm.getClass().getMethod("setWifiApEnabled", WifiConfiguration.class, boolean.class);
@@ -187,14 +187,14 @@ public class MainActivity extends Activity {
         }
     }
 
-    private void showAppPicker(TextView statusTv) {
+    private void showAppPicker(final TextView statusTv) {
         PackageManager pm = getPackageManager();
         Intent mainIntent = new Intent(Intent.ACTION_MAIN, null);
         mainIntent.addCategory(Intent.CATEGORY_LAUNCHER);
         List<ResolveInfo> apps = pm.queryIntentActivities(mainIntent, 0);
 
-        List<String> names = new ArrayList<>();
-        List<String> pkgs = new ArrayList<>();
+        final List<String> names = new ArrayList<>();
+        final List<String> pkgs = new ArrayList<>();
         for (ResolveInfo info : apps) {
             String p = info.activityInfo.packageName;
             if (!p.equals(getPackageName())) {
