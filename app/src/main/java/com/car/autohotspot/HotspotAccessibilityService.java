@@ -35,7 +35,6 @@ public class HotspotAccessibilityService extends AccessibilityService {
 
         if (loopRunnable != null) handler.removeCallbacks(loopRunnable);
 
-        // 后台常驻定时器：每 700 毫秒主動扫描一次屏幕并推进状态，不依赖界面焦点
         loopRunnable = new Runnable() {
             @Override
             public void run() {
@@ -53,15 +52,16 @@ public class HotspotAccessibilityService extends AccessibilityService {
                     instance.scanAndAct(ctx);
                 }
 
-                // 最多循环尝试 20 次（约 14 秒）
-                if (taskActive && stepCount < 20) {
-                    handler.postDelayed(this, 700);
+                // 最多循环尝试 15 次（每次间隔 1.2 秒，留足热点启动反应时间）
+                if (taskActive && stepCount < 15) {
+                    handler.postDelayed(this, 1200);
                 } else {
                     taskActive = false;
                 }
             }
         };
-        handler.postDelayed(loopRunnable, 600);
+        // 跳转页面后等 800ms 让页面加载出来再开始第 1 次扫描
+        handler.postDelayed(loopRunnable, 800);
     }
 
     public static void stopTask() {
@@ -74,58 +74,57 @@ public class HotspotAccessibilityService extends AccessibilityService {
         taskActive = false;
         if (loopRunnable != null) handler.removeCallbacks(loopRunnable);
 
-        Toast.makeText(ctx, "热点已开启，正在打开 CarPlay...", Toast.LENGTH_SHORT).show();
-        // 热点刚打开时等 800ms 让网络接口就绪，随后立即启动 CarPlay
-        handler.postDelayed(() -> MainActivity.launchApp(ctx, targetPkg), 800);
+        Toast.makeText(ctx, "✅ 热点已开启！正在打开 CarPlay...", Toast.LENGTH_SHORT).show();
+        handler.postDelayed(() -> MainActivity.launchApp(ctx, targetPkg), 600);
     }
 
     @Override
     public void onAccessibilityEvent(AccessibilityEvent event) {
-        // 已有 700ms 主动轮询定时器驱动，这里无需重复触发，防止连点
     }
 
     private void scanAndAct(Context ctx) {
         AccessibilityNodeInfo root = getRootInActiveWindow();
         if (root == null) return;
 
-        // 看看当前是不是已经进到了第二张图的「WLAN 热点」详情页（有“热点名称”或“安全性”字样）
+        // 判断是否已经在「WLAN 热点」详情页（有“热点名称”或“安全性”或“热点密码”字样）
         boolean isInHotspotDetailPage = hasText(root, "热点名称") || hasText(root, "安全性") || hasText(root, "热点密码");
 
         if (isInHotspotDetailPage) {
-            // 如果页面上已经显示“开启”或“已开启”，说明热点已经打开了！立即跳去 CarPlay！
-            if (hasText(root, "开启") && !hasText(root, "关闭")) {
+            // 如果页面上已经变成“开启”且没有“关闭”横条，说明热点已经开了！
+            if (hasText(root, "开启") && !hasExactCloseBar(root)) {
                 finishAndLaunch(ctx);
                 return;
             }
 
-            // 如果页面上显示“关闭”（如你第二张照片所示），立刻点击“关闭”所在的 SwitchBar 横条！
+            Toast.makeText(ctx, "正在打开热点开关...", Toast.LENGTH_SHORT).show();
+
+            // 【第 1 重保险】直接寻找页面上所有 Switch 开关控件以及可点击的整行横条进行触发
+            clickAllSwitchesAndBars(root);
+
+            // 【第 2 重保险】找到“关闭”文字节点，点击它及上层父容器，并提取真实 Y 坐标进行双点触摸
+            int clickY = 155; // 默认高度（适配 1280x720 车机屏）
             List<AccessibilityNodeInfo> closeNodes = root.findAccessibilityNodeInfosByText("关闭");
-            if (closeNodes != null && !closeNodes.isEmpty()) {
+            if (closeNodes != null) {
                 for (AccessibilityNodeInfo node : closeNodes) {
-                    // 排除最底部高级说明里的“自动关闭热点”那行小字
-                    CharSequence txt = node.getText();
-                    if (txt != null && txt.toString().trim().equals("关闭")) {
-                        // 动作 A：尝试节点树点击（点它自身、父容器以及同级的 Switch）
-                        boolean clicked = clickNodeAndParents(node);
-                        // 动作 B：同时获取“关闭”这一栏在屏幕上的真实坐标，直接模拟手指点击右侧开关位置！
+                    if (node.getText() != null && node.getText().toString().trim().equals("关闭")) {
+                        clickNodeAndParents(node);
                         Rect rect = new Rect();
                         node.getBoundsInScreen(rect);
-                        int clickY = rect.centerY() > 0 ? rect.centerY() : 155;
-                        // 点击横条正中间偏右的位置（SwitchBar 整条任何位置都能点开）
-                        tapScreen(640, clickY);
-                        return;
+                        if (rect.centerY() > 50 && rect.centerY() < 400) {
+                            clickY = rect.centerY();
+                        }
                     }
                 }
             }
 
-            // 保底：如果没找到“关闭”文字节点，直接点击未勾选的 Switch 控件或固定坐标 (1080, 155)
-            if (!clickUncheckedSwitch(root)) {
-                tapScreen(1080, 155);
-            }
+            // 【第 3 重保险】无障碍手势直接触摸点击右侧圆点开关 (1070, clickY) 及横条中部
+            tapScreen(1070, clickY);
+            handler.postDelayed(() -> tapScreen(640, clickY), 150);
+
             return;
         }
 
-        // 如果还没进到「WLAN 热点」详情页（在一级目录列表），找到「WLAN 热点」点进去
+        // 如果在一级列表页（「热点和网络共享」），找到「WLAN 热点」点进去
         String[] entryWords = {"WLAN 热点", "Wi-Fi 热点", "便携式"};
         for (String w : entryWords) {
             List<AccessibilityNodeInfo> list = root.findAccessibilityNodeInfosByText(w);
@@ -139,18 +138,41 @@ public class HotspotAccessibilityService extends AccessibilityService {
         }
     }
 
-    private boolean hasText(AccessibilityNodeInfo root, String text) {
-        List<AccessibilityNodeInfo> list = root.findAccessibilityNodeInfosByText(text);
-        if (list == null || list.isEmpty()) return false;
+    private boolean hasExactCloseBar(AccessibilityNodeInfo root) {
+        List<AccessibilityNodeInfo> list = root.findAccessibilityNodeInfosByText("关闭");
+        if (list == null) return false;
         for (AccessibilityNodeInfo n : list) {
-            if (n.getText() != null) {
-                String t = n.getText().toString().trim();
-                // 避免把“自动关闭热点”误判为“关闭”状态
-                if (text.equals("关闭") && t.contains("自动关闭")) continue;
+            if (n.getText() != null && n.getText().toString().trim().equals("关闭")) {
                 return true;
             }
         }
         return false;
+    }
+
+    private boolean hasText(AccessibilityNodeInfo root, String text) {
+        List<AccessibilityNodeInfo> list = root.findAccessibilityNodeInfosByText(text);
+        return list != null && !list.isEmpty();
+    }
+
+    private void clickAllSwitchesAndBars(AccessibilityNodeInfo node) {
+        if (node == null) return;
+        CharSequence cls = node.getClassName();
+        if (cls != null) {
+            String className = cls.toString();
+            // 只要是 Switch 控件或 SwitchBar 容器，且未处于开启状态，直接点它和它的父布局
+            if (className.contains("Switch") || (node.isCheckable() && !node.isChecked())) {
+                node.performAction(AccessibilityNodeInfo.ACTION_CLICK);
+                clickNodeAndParents(node);
+                Rect r = new Rect();
+                node.getBoundsInScreen(r);
+                if (r.centerX() > 0 && r.centerY() > 0) {
+                    tapScreen(r.centerX(), r.centerY());
+                }
+            }
+        }
+        for (int i = 0; i < node.getChildCount(); i++) {
+            clickAllSwitchesAndBars(node.getChild(i));
+        }
     }
 
     private boolean clickNodeAndParents(AccessibilityNodeInfo node) {
@@ -165,33 +187,13 @@ public class HotspotAccessibilityService extends AccessibilityService {
         return anySuccess;
     }
 
-    private boolean clickUncheckedSwitch(AccessibilityNodeInfo node) {
-        if (node == null) return false;
-        if (node.isCheckable() && !node.isChecked()) {
-            Rect r = new Rect();
-            node.getBoundsInScreen(r);
-            if (r.centerX() > 0 && r.centerY() > 0) {
-                tapScreen(r.centerX(), r.centerY());
-                return true;
-            }
-            return clickNodeAndParents(node);
-        }
-        for (int i = 0; i < node.getChildCount(); i++) {
-            if (clickUncheckedSwitch(node.getChild(i))) return true;
-        }
-        return false;
-    }
-
-    /**
-     * 使用 Android 7.0+ 原生无障碍手势直接模拟手指点击屏幕坐标
-     */
     private void tapScreen(int x, int y) {
         try {
             Path path = new Path();
             path.moveTo(x, y);
             GestureDescription.Builder builder = new GestureDescription.Builder();
             GestureDescription gesture = builder
-                    .addStroke(new GestureDescription.StrokeDescription(path, 0, 80))
+                    .addStroke(new GestureDescription.StrokeDescription(path, 0, 100))
                     .build();
             dispatchGesture(gesture, null, null);
         } catch (Exception ignored) {}
