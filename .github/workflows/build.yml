@@ -21,7 +21,7 @@ jobs:
       - name: Accept Android SDK Licenses
         run: yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --licenses || true
 
-- name: Build Debug APK
+      - name: Build Debug APK
         run: gradle assembleDebug --no-daemon
 
       - name: Upload APK
