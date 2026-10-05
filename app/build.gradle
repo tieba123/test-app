@@ -8,11 +8,10 @@ android {
 
     defaultConfig {
         applicationId "com.car.autohotspot"
-        minSdk 21
-        // 核心技巧：targetSdk 设为 22，在 Android 9.0 上免动态权限、免 Shizuku
-        targetSdk 22
-        versionCode 1
-        versionName "1.0"
+        minSdk 24
+        targetSdk 28
+        versionCode 2
+        versionName "2.0"
     }
 
     buildTypes {
